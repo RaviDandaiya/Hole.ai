@@ -1,24 +1,26 @@
 {
-  "name": "hole.ai",
-  "version": "1.0.0",
-  "main": "index.js",
-  "dependencies": {
-    "@expo/metro-runtime": "~56.0.13",
-    "@react-native-async-storage/async-storage": "2.2.0",
-    "expo": "~56.0.5",
-    "expo-status-bar": "~56.0.4",
-    "react": "19.2.3",
-    "react-dom": "19.2.3",
-    "react-native": "0.85.3",
-    "react-native-google-mobile-ads": "^16.3.3",
-    "react-native-web": "^0.21.2"
-  },
+  "name": "cybervortex-io",
+  "version": "2.0.0",
+  "type": "module",
+  "private": true,
   "scripts": {
-    "start": "expo start",
-    "dev": "expo start",
-    "android": "expo run:android",
-    "ios": "expo run:ios",
-    "web": "expo start --web"
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
   },
-  "private": true
+  "dependencies": {
+    "three": "^0.170.0",
+    "gsap": "^3.12.7",
+    "howler": "^2.2.4",
+    "hammerjs": "^2.0.8"
+  },
+  "devDependencies": {
+    "@types/hammerjs": "^2.0.46",
+    "@types/howler": "^2.2.12",
+    "@types/react": "~19.2.14",
+    "@types/three": "^0.170.0",
+    "typescript": "~6.0.3",
+    "vite": "^6.0.0",
+    "vite-plugin-glsl": "^1.3.0"
+  }
 }
