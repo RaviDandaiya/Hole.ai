@@ -105,11 +105,14 @@ export class HUD {
     this.sizeFillEl.style.width = `${pct}%`;
   }
 
-  updatePowerups(magnet: number, speed: number, multiplier: number): void {
+  updatePowerups(magnet: number, speed: number, multiplier: number, freeze: number = 0, ghost: number = 0, pulse: number = 0): void {
     let html = '';
     if (magnet > 0) html += this.powerupRow('🧲', magnet, 15, '#FF007F');
     if (speed > 0) html += this.powerupRow('⚡', speed, 15, '#00F0FF');
     if (multiplier > 0) html += this.powerupRow('💎', multiplier, 15, '#FFD700');
+    if (freeze > 0) html += this.powerupRow('❄️', freeze, 10, '#00F5FF');
+    if (ghost > 0) html += this.powerupRow('👻', ghost, 10, '#FF00FF');
+    if (pulse > 0) html += this.powerupRow('🌀', pulse, 2, '#FFFFFF');
     this.powerupsEl.innerHTML = html;
   }
 

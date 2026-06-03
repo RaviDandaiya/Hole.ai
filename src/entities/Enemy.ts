@@ -3,6 +3,7 @@ import holeVertShader from '../shaders/hole.vert.glsl';
 import holeFragShader from '../shaders/hole.frag.glsl';
 import { INITIAL_PLAYER_RADIUS, MAX_HOLE_RADIUS, MAP_SIZE, LEVEL_THRESHOLDS, getBaseSpeed, BOT_NAMES, BOT_COLORS } from '../utils/constants';
 import { rand, clamp } from '../utils/math';
+import { SpatialGrid } from '../utils/SpatialGrid';
 
 export interface EnemyData {
   id: number;
@@ -80,7 +81,7 @@ export class EnemyManager {
     }
   }
 
-  update(dt: number, time: number, playerX: number, playerZ: number, playerRadius: number, playerAlive: boolean, objects: any[], camera: THREE.PerspectiveCamera): void {
+  update(dt: number, time: number, playerX: number, playerZ: number, playerRadius: number, playerAlive: boolean, spatialGrid: SpatialGrid<any>, camera: THREE.PerspectiveCamera, isFrozen: boolean = false): void {
     for (const bot of this.enemies) {
       if (!bot.isAlive) {
         bot.respawnTimer -= dt * 1000;
@@ -97,42 +98,136 @@ export class EnemyManager {
       bot.mesh.visible = true; bot.glowLight.visible = true;
       if (bot.radius < bot.targetRadius) bot.radius = Math.min(bot.targetRadius, bot.radius + 0.35);
 
-      let speed = getBaseSpeed(bot.radius) * 0.96;
+      let speed = isFrozen ? 0 : getBaseSpeed(bot.radius) * 0.96;
+      if (isFrozen) {
+        bot.vx = 0; bot.vz = 0;
+      }
       bot.targetTimer -= dt * 1000;
 
       // AI steering
-      let targetX = MAP_SIZE / 2, targetZ = MAP_SIZE / 2;
-      let hasTarget = false;
+      let avoidForceX = 0;
+      let avoidForceZ = 0;
 
+      // ─── 1. Flee from larger threats ───
+      // Flee from player
       const distToPlayer = Math.hypot(playerX - bot.x, playerZ - bot.z);
-      if (playerAlive && distToPlayer < 350) {
-        if (bot.radius > playerRadius + 10) {
-          targetX = playerX; targetZ = playerZ; hasTarget = true;
-        } else if (playerRadius > bot.radius + 10) {
-          const a = Math.atan2(bot.z - playerZ, bot.x - playerX);
-          targetX = bot.x + Math.cos(a) * 220; targetZ = bot.z + Math.sin(a) * 220; hasTarget = true;
+      if (playerAlive && playerRadius > bot.radius + 8 && distToPlayer < (250 + bot.radius)) {
+        const fw = (250 + bot.radius - distToPlayer) / (250 + bot.radius);
+        avoidForceX += (bot.x - playerX) / distToPlayer * fw * 2.5;
+        avoidForceZ += (bot.z - playerZ) / distToPlayer * fw * 2.5;
+      }
+      // Flee from larger bots
+      for (const other of this.enemies) {
+        if (other.id === bot.id || !other.isAlive) continue;
+        const d = Math.hypot(other.x - bot.x, other.z - bot.z);
+        if (other.radius > bot.radius + 8 && d < (250 + bot.radius)) {
+          const fw = (250 + bot.radius - d) / (250 + bot.radius);
+          avoidForceX += (bot.x - other.x) / d * fw * 2.5;
+          avoidForceZ += (bot.z - other.z) / d * fw * 2.5;
         }
       }
 
-      if (!hasTarget) {
-        let bestDist = 450;
-        for (const obj of objects) {
-          if (obj.isEaten) continue;
-          if (bot.radius < obj.type.size - 2) continue;
-          const d = Math.hypot(obj.x - bot.x, obj.z - bot.z);
-          if (d < bestDist) { bestDist = d; targetX = obj.x; targetZ = obj.z; hasTarget = true; }
+      // ─── 2. Hunt smaller targets ───
+      let huntForceX = 0;
+      let huntForceZ = 0;
+      let hasHunt = false;
+
+      // Hunt player if smaller
+      if (playerAlive && bot.radius > playerRadius + 8 && distToPlayer < (300 + bot.radius)) {
+        huntForceX += (playerX - bot.x) / distToPlayer;
+        huntForceZ += (playerZ - bot.z) / distToPlayer;
+        hasHunt = true;
+      }
+      // Hunt smaller bots
+      let closestHunt: EnemyData | null = null;
+      let closestHuntDist = Infinity;
+      for (const other of this.enemies) {
+        if (other.id === bot.id || !other.isAlive) continue;
+        const d = Math.hypot(other.x - bot.x, other.z - bot.z);
+        if (bot.radius > other.radius + 8 && d < (300 + bot.radius) && d < closestHuntDist) {
+          closestHuntDist = d;
+          closestHunt = other;
+        }
+      }
+      if (closestHunt) {
+        huntForceX += (closestHunt.x - bot.x) / closestHuntDist;
+        huntForceZ += (closestHunt.z - bot.z) / closestHuntDist;
+        hasHunt = true;
+      }
+
+      // Normalize hunt force if active
+      if (hasHunt) {
+        const mag = Math.hypot(huntForceX, huntForceZ);
+        if (mag > 0.001) {
+          huntForceX /= mag;
+          huntForceZ /= mag;
         }
       }
 
-      if (hasTarget) {
-        const a = Math.atan2(targetZ - bot.z, targetX - bot.x);
-        bot.vx += (Math.cos(a) * speed - bot.vx) * 0.12;
-        bot.vz += (Math.sin(a) * speed - bot.vz) * 0.12;
+      // ─── 3. Density-based foraging ───
+      let forageForceX = 0;
+      let forageForceZ = 0;
+      let hasForage = false;
+
+      const nearbyObjs = spatialGrid.query(bot.x, bot.z, 450);
+      let forageX = 0;
+      let forageZ = 0;
+      let totalWeight = 0;
+      for (const obj of nearbyObjs) {
+        if (obj.isEaten) continue;
+        if (bot.radius < obj.type.size - 2) continue; // Can't eat it yet
+        const d = Math.hypot(obj.x - bot.x, obj.z - bot.z);
+        if (d > 0) {
+          const w = (450 - d) / 450;
+          forageX += (obj.x - bot.x) / d * w;
+          forageZ += (obj.z - bot.z) / d * w;
+          totalWeight += w;
+        }
+      }
+      if (totalWeight > 0) {
+        const mag = Math.hypot(forageX, forageZ);
+        if (mag > 0.001) {
+          forageForceX = forageX / mag;
+          forageForceZ = forageZ / mag;
+          hasForage = true;
+        }
+      }
+
+      // ─── 4. Combine Forces & Steer ───
+      let steerX = 0;
+      let steerZ = 0;
+      let isSteering = false;
+
+      const avoidMag = Math.hypot(avoidForceX, avoidForceZ);
+      if (avoidMag > 0.05) {
+        steerX = avoidForceX / avoidMag;
+        steerZ = avoidForceZ / avoidMag;
+        isSteering = true;
+      } else if (hasHunt) {
+        steerX = huntForceX;
+        steerZ = huntForceZ;
+        isSteering = true;
+      } else if (hasForage) {
+        steerX = forageForceX;
+        steerZ = forageForceZ;
+        isSteering = true;
+      }
+
+      if (isSteering) {
+        bot.vx += (steerX * speed - bot.vx) * 0.12;
+        bot.vz += (steerZ * speed - bot.vz) * 0.12;
       } else if (bot.targetTimer <= 0) {
         const ra = rand(0, Math.PI * 2);
         bot.vx = Math.cos(ra) * speed; bot.vz = Math.sin(ra) * speed;
         bot.targetTimer = rand(800, 2500);
       }
+
+      // ─── 5. Stuck / Wall Collision Prevention ───
+      const margin = bot.radius + 30;
+      if (bot.x < margin) bot.vx += 0.8 * dt * speed;
+      if (bot.x > MAP_SIZE - margin) bot.vx -= 0.8 * dt * speed;
+      if (bot.z < margin) bot.vz += 0.8 * dt * speed;
+      if (bot.z > MAP_SIZE - margin) bot.vz -= 0.8 * dt * speed;
 
       bot.x += bot.vx; bot.z += bot.vz;
       bot.x = clamp(bot.x, bot.radius, MAP_SIZE - bot.radius);

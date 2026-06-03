@@ -34,6 +34,26 @@ export class WorldObjectManager {
 
   getObjects(): WorldObjectData[] { return this.objects; }
 
+  populateFromShared(sharedObjs: any[], objectTypes: Record<string, ObjectType>): void {
+    this.clear();
+    sharedObjs.forEach(obj => {
+      const type = objectTypes[obj.typeId];
+      if (!type) return;
+      const group = this.createMesh(type);
+      group.position.set(obj.x, 0, obj.z);
+      this.scene.add(group);
+      
+      this.objects.push({
+        id: obj.id, type, x: obj.x, z: obj.z,
+        isEaten: obj.isEaten, swallowProgress: obj.isEaten ? 1.0 : 0, eaterX: 0, eaterZ: 0,
+        vx: 0, vz: 0, mesh: group, tiltX: 0, tiltZ: 0, spinSpeed: 0, justRespawned: false,
+      });
+      if (obj.isEaten) {
+        group.scale.setScalar(0.01);
+      }
+    });
+  }
+
   populate(objectTypes: Record<string, ObjectType>, mapSize: number): void {
     this.clear();
     let idCounter = 0;

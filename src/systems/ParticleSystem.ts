@@ -99,25 +99,89 @@ export class ParticleSystem {
   }
 
   /** Emit trail particles behind moving hole */
-  emitTrail(x: number, z: number, color: string): void {
-    const count = rand(0, 1) > 0.4 ? 1 : 0; // ~60% chance per frame
+  emitTrail(x: number, z: number, color: string, trailType: string = 'SPARKS'): void {
+    const chance = trailType === 'FIRE' ? 0.3 : 0.4;
+    const count = rand(0, 1) > chance ? 1 : 0;
     if (count === 0) return;
-    const rgb = this.hexToRgb(color);
+    
     const p = this.getInactiveParticle();
     if (!p) return;
-    p.x = x + rand(-5, 5);
+
+    p.x = x + rand(-6, 6);
     p.y = 1;
-    p.z = z + rand(-5, 5);
-    p.vx = rand(-1, 1);
-    p.vy = rand(0.5, 1.5);
-    p.vz = rand(-1, 1);
-    p.size = rand(2, 5);
-    p.alpha = 0.8;
-    p.decay = rand(0.02, 0.04);
-    p.r = rgb.r;
-    p.g = rgb.g;
-    p.b = rgb.b;
+    p.z = z + rand(-6, 6);
     p.active = true;
+
+    if (trailType === 'FIRE') {
+      p.vx = rand(-0.8, 0.8);
+      p.vy = rand(1.8, 3.2);
+      p.vz = rand(-0.8, 0.8);
+      p.size = rand(3, 6);
+      p.alpha = 0.9;
+      p.decay = rand(0.04, 0.07);
+      p.r = rand(0.9, 1.0);
+      p.g = rand(0.3, 0.6);
+      p.b = 0.0;
+    } else if (trailType === 'MATRIX') {
+      p.vx = rand(-0.3, 0.3);
+      p.vy = rand(0.4, 0.8);
+      p.vz = rand(-0.3, 0.3);
+      p.size = rand(2.5, 4.5);
+      p.alpha = 0.8;
+      p.decay = rand(0.015, 0.025);
+      p.r = 0.0;
+      p.g = rand(0.6, 1.0);
+      p.b = 0.0;
+    } else if (trailType === 'COSMIC') {
+      p.vx = rand(-1.5, 1.5);
+      p.vy = rand(0.6, 1.6);
+      p.vz = rand(-1.5, 1.5);
+      p.size = rand(2.0, 4.0);
+      p.alpha = 0.85;
+      p.decay = rand(0.02, 0.035);
+      if (Math.random() < 0.5) {
+        p.r = 0.8; p.g = 0.0; p.b = 1.0; // purple/magenta
+      } else {
+        p.r = 0.0; p.g = 0.9; p.b = 1.0; // cyan
+      }
+    } else {
+      // SPARKS (Default)
+      const rgb = this.hexToRgb(color);
+      p.vx = rand(-1, 1);
+      p.vy = rand(0.5, 1.5);
+      p.vz = rand(-1, 1);
+      p.size = rand(2, 5);
+      p.alpha = 0.8;
+      p.decay = rand(0.02, 0.04);
+      p.r = rgb.r;
+      p.g = rgb.g;
+      p.b = rgb.b;
+    }
+  }
+
+  /** Emit expanding pulse wave of particles */
+  emitPulseWave(x: number, z: number, color: string): void {
+    const rgb = this.hexToRgb(color);
+    const count = 40;
+    for (let i = 0; i < count; i++) {
+      const p = this.getInactiveParticle();
+      if (!p) break;
+      const angle = (i / count) * Math.PI * 2;
+      const speed = 10;
+      p.x = x;
+      p.y = 1.5;
+      p.z = z;
+      p.vx = Math.cos(angle) * speed;
+      p.vy = 0.3;
+      p.vz = Math.sin(angle) * speed;
+      p.size = rand(3, 6);
+      p.alpha = 1.0;
+      p.decay = 0.04;
+      p.r = rgb.r;
+      p.g = rgb.g;
+      p.b = rgb.b;
+      p.active = true;
+    }
   }
 
   /** Update all particles each frame */

@@ -74,3 +74,37 @@ export function getHighScores(): Record<string, number> {
 export function setHighScores(scores: Record<string, number>): void {
   saveJSON('high_scores', scores);
 }
+
+// Trails
+export function getUnlockedTrails(): string[] {
+  return loadJSON<string[]>('unlocked_trails', ['SPARKS']);
+}
+
+export function setUnlockedTrails(trails: string[]): void {
+  saveJSON('unlocked_trails', trails);
+}
+
+export function getEquippedTrail(): string {
+  return loadData('equipped_trail') || 'SPARKS';
+}
+
+export function setEquippedTrail(trailId: string): void {
+  saveData('equipped_trail', trailId);
+}
+
+// Perks
+export function getUnlockedPerks(): string[] {
+  return loadJSON<string[]>('unlocked_perks', []);
+}
+
+export function setUnlockedPerks(perks: string[]): void {
+  saveJSON('unlocked_perks', perks);
+}
+
+export function getActivePerk(): string {
+  return loadData('active_perk') || '';
+}
+
+export function setActivePerk(perkId: string): void {
+  saveData('active_perk', perkId);
+}

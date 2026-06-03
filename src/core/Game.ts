@@ -7,6 +7,7 @@ import { Hole } from '../entities/Hole';
 import { WorldObjectManager, WorldObjectData } from '../entities/WorldObject';
 import { EnemyManager } from '../entities/Enemy';
 import { ParticleSystem } from '../systems/ParticleSystem';
+import { HazardManager } from '../entities/HazardManager';
 import { LoadingScreen } from '../ui/LoadingScreen';
 import { MainMenu, GameMode } from '../ui/MainMenu';
 import { HUD, LeaderboardEntry } from '../ui/HUD';
@@ -16,14 +17,16 @@ import { SizeUpCelebration } from '../ui/SizeUpCelebration';
 import {
   GameState, MAP_DEFINITIONS, MAP_SIZE, GAME_DURATION, BOT_COUNT,
   POWERUP_TYPES, LEVEL_THRESHOLDS, LEVEL_NAMES, isMobileDevice, MapDefinition,
-  MAX_HOLE_RADIUS,
+  MAX_HOLE_RADIUS, SKINS,
 } from '../utils/constants';
 import { rand, distance } from '../utils/math';
 import * as storage from '../utils/storage';
 import * as haptics from '../utils/haptics';
+import { SpatialGrid } from '../utils/SpatialGrid';
 
 import groundVertShader from '../shaders/ground.vert.glsl';
 import groundFragShader from '../shaders/ground.frag.glsl';
+import { io, Socket } from 'socket.io-client';
 
 interface PowerupInstance {
   type: string; x: number; z: number; color: string; symbol: string; label: string;
@@ -40,6 +43,7 @@ export class Game {
   private player!: Hole;
   private objects!: WorldObjectManager;
   private enemies!: EnemyManager;
+  private hazards!: HazardManager;
 
   // UI
   private loadingScreen: LoadingScreen;
@@ -59,8 +63,14 @@ export class Game {
   private magnetTimer = 0;
   private speedTimer = 0;
   private multiplierTimer = 0;
+  private freezeTimer = 0;
+  private ghostTimer = 0;
+  private pulseTimer = 0;
   private prevLevel = 0;
   private hudUpdateCounter = 0;
+  private spatialGrid = new SpatialGrid<any>(200);
+  private socket: Socket | null = null;
+  private remotePlayers: Map<string, { hole: Hole; labelDiv: HTMLDivElement }> = new Map();
 
   // Ground
   private groundMaterial!: THREE.ShaderMaterial;
@@ -88,6 +98,10 @@ export class Game {
     this.player = new Hole(this.renderer.scene, storage.getEquippedSkin());
     this.objects = new WorldObjectManager(this.renderer.scene);
     this.enemies = new EnemyManager(this.renderer.scene);
+    this.hazards = new HazardManager(this.renderer.scene, this.particles);
+
+    (window as any).gameCamera = this.camera;
+    (window as any).gameAudio = this.audio;
 
     // ─── Ground plane ───
     this.createGround();
@@ -129,9 +143,22 @@ export class Game {
     this.player.glowLight.visible = false;
     this.enemies.clear();
     this.objects.clear();
+    this.hazards.clear();
     this.clearPowerups();
     if (this.timerInterval) clearInterval(this.timerInterval);
     this.audio.stopAmbient();
+
+    if (this.socket) {
+      this.socket.disconnect();
+      this.socket = null;
+    }
+    this.remotePlayers.forEach(rp => {
+      rp.hole.dispose();
+      this.renderer.scene.remove(rp.hole.mesh);
+      this.renderer.scene.remove(rp.hole.glowLight);
+      rp.labelDiv.remove();
+    });
+    this.remotePlayers.clear();
     if (this.keyboardHint) this.keyboardHint.remove();
   }
 
@@ -151,17 +178,138 @@ export class Game {
     this.player.reset(skinId);
     this.prevLevel = 0;
 
-    // Populate world objects
-    this.objects.populate(mapDef.objects, MAP_SIZE);
+    // Apply starting perks
+    const activePerk = storage.getActivePerk();
+    if (activePerk === 'SIZE_PERK') {
+      this.player.radius = 29;
+      this.player.targetRadius = 29;
+      this.player.mesh.scale.set(29 * 2.5, 29 * 2.5, 1);
+    }
+    this.player.speedMultiplier = activePerk === 'SPEED_PERK' ? 1.15 : 1.0;
 
-    // Create bots
-    this.enemies.createBots(BOT_COUNT);
+    if (mode === 'multiplayer') {
+      this.socket = io('http://localhost:3002');
+      
+      this.socket.on('init', (data) => {
+        this.objects.populateFromShared(data.objects, mapDef.objects);
+        
+        this.socket!.emit('join', {
+          name: storage.loadData('player_name') || 'You',
+          skin: this.equippedSkin
+        });
+        
+        Object.keys(data.players).forEach(id => {
+          if (id !== this.socket!.id) {
+            this.addRemotePlayer(id, data.players[id]);
+          }
+        });
+      });
+
+      this.socket.on('playerJoined', (data) => {
+        if (data.id !== this.socket!.id) {
+          this.addRemotePlayer(data.id, data);
+        }
+      });
+
+      this.socket.on('playerUpdated', (data) => {
+        const rp = this.remotePlayers.get(data.id);
+        if (rp) {
+          rp.hole.x = data.x;
+          rp.hole.z = data.z;
+          rp.hole.targetRadius = data.radius;
+          rp.hole.score = data.score;
+          rp.hole.isAlive = data.isAlive;
+        }
+      });
+
+      this.socket.on('playerDisconnected', (id) => {
+        const rp = this.remotePlayers.get(id);
+        if (rp) {
+          rp.hole.dispose();
+          this.renderer.scene.remove(rp.hole.mesh);
+          this.renderer.scene.remove(rp.hole.glowLight);
+          rp.labelDiv.remove();
+          this.remotePlayers.delete(id);
+        }
+      });
+
+      this.socket.on('objectEaten', (data) => {
+        const { objectId, eaterId, x, z } = data;
+        const obj = this.objects.getObjects().find(o => o.id === objectId);
+        if (obj && !obj.isEaten) {
+          obj.isEaten = true;
+          obj.swallowProgress = 0.05;
+          obj.eaterX = x;
+          obj.eaterZ = z;
+          
+          this.particles.emitBurst(obj.x, obj.z, obj.type.neonColor, 15);
+          this.audio.playAbsorbSmall(obj.type.size / 145);
+          
+          if (eaterId !== this.socket!.id) {
+            const rp = this.remotePlayers.get(eaterId);
+            if (rp) rp.hole.addScore(obj.type.score, obj.type.growth);
+          }
+        }
+      });
+
+      this.socket.on('objectRespawned', (data) => {
+        const { objectId, x, z } = data;
+        const obj = this.objects.getObjects().find(o => o.id === objectId);
+        if (obj) {
+          obj.x = x; obj.z = z;
+          obj.isEaten = false; obj.swallowProgress = 0;
+          obj.spinSpeed = 0; obj.tiltX = 0; obj.tiltZ = 0;
+          obj.mesh.scale.setScalar(1);
+          obj.mesh.rotation.set(0, 0, 0);
+          obj.mesh.position.set(x, 0, z);
+          obj.justRespawned = true;
+        }
+      });
+
+      this.socket.on('playerEaten', (data) => {
+        const { targetId, eaterId } = data;
+        if (targetId === this.socket!.id) {
+          this.player.kill();
+          this.particles.emitBurst(this.player.x, this.player.z, '#FF00FF', 25);
+          this.camera.addTrauma(0.5);
+          
+          setTimeout(() => {
+            if (this.state === GameState.PLAYING) {
+              const sp = this.getSafeSpawn(this.player.radius);
+              this.player.respawn(sp.x, sp.z);
+              this.socket!.emit('respawn');
+            }
+          }, 3500);
+        } else {
+          const rp = this.remotePlayers.get(targetId);
+          if (rp) {
+            rp.hole.isAlive = false;
+            this.particles.emitBurst(rp.hole.x, rp.hole.z, '#2FF5FF', 25);
+          }
+          if (eaterId === this.socket!.id) {
+            this.player.addScore(450, 22);
+            this.camera.addTrauma(0.4);
+            this.audio.playBotKill();
+            haptics.vibrateBotKill();
+          } else {
+            const eater = this.remotePlayers.get(eaterId);
+            if (eater) eater.hole.addScore(450, 22);
+          }
+        }
+      });
+    } else {
+      this.objects.populate(mapDef.objects, MAP_SIZE);
+      this.enemies.createBots(BOT_COUNT);
+    }
 
     // Reset powerups
     this.clearPowerups();
     this.magnetTimer = 0;
     this.speedTimer = 0;
     this.multiplierTimer = 0;
+    this.freezeTimer = 0;
+    this.ghostTimer = 0;
+    this.pulseTimer = 0;
 
     // Update ground colors
     this.updateGroundColors(mapDef);
@@ -198,7 +346,13 @@ export class Game {
     if (this.magnetTimer > 0) this.magnetTimer--;
     if (this.speedTimer > 0) this.speedTimer--;
     if (this.multiplierTimer > 0) this.multiplierTimer--;
-    this.hud.updatePowerups(this.magnetTimer, this.speedTimer, this.multiplierTimer);
+    if (this.freezeTimer > 0) this.freezeTimer--;
+    if (this.ghostTimer > 0) this.ghostTimer--;
+    if (this.pulseTimer > 0) this.pulseTimer--;
+    this.hud.updatePowerups(
+      this.magnetTimer, this.speedTimer, this.multiplierTimer,
+      this.freezeTimer, this.ghostTimer, this.pulseTimer
+    );
 
     // Spawn powerups
     if (this.timeLeft % 10 === 0 && this.powerups.filter(p => !p.isEaten).length < 3) {
@@ -269,6 +423,21 @@ export class Game {
     // ─── Player update ───
     this.player.update(dt, input.dx, input.dy, time, this.speedTimer > 0);
 
+    // Ghost skin color feedback
+    if (this.player.isAlive) {
+      if (this.ghostTimer > 0) {
+        const flash = Math.sin(time * 15) * 0.5 + 0.5;
+        this.player.material.uniforms.uRimColor.value.set(1.0, 0.0, 1.0); // magenta
+        this.player.material.uniforms.uRimColor2.value.set(0.2 + flash * 0.8, 0.8 + flash * 0.2, 1.0); // bright neon cyan/white
+      } else {
+        const skin = SKINS.find(s => s.id === this.equippedSkin) || SKINS[0];
+        const p = this.hexToRgb(skin.primary);
+        const s2 = this.hexToRgb(skin.secondary);
+        this.player.material.uniforms.uRimColor.value.set(p.r, p.g, p.b);
+        this.player.material.uniforms.uRimColor2.value.set(s2.r, s2.g, s2.b);
+      }
+    }
+
     // Respawn check
     if (!this.player.isAlive && this.player.respawnTimer <= 0) {
       const sp = this.getSafeSpawn(this.player.radius);
@@ -277,17 +446,73 @@ export class Game {
 
     // ─── Trail particles ───
     if (this.player.isAlive && input.isActive) {
-      this.particles.emitTrail(this.player.x, this.player.z, this.player.getRimColor());
+      if (this.pulseTimer > 0) {
+        if (Math.random() < 0.2) {
+          this.particles.emitPulseWave(this.player.x, this.player.z, '#FFFFFF');
+        }
+      }
+      this.particles.emitTrail(this.player.x, this.player.z, this.player.getRimColor(), storage.getEquippedTrail());
     }
 
     // ─── Objects update ───
     this.objects.update(dt, MAP_SIZE, this.player.x, this.player.z, this.player.radius);
 
+    // ─── Populate SpatialGrid ───
+    this.spatialGrid.clear();
+    for (const obj of this.objects.getObjects()) {
+      if (!obj.isEaten) this.spatialGrid.insert(obj);
+    }
+
     // ─── Enemies update ───
-    this.enemies.update(
-      dt, time, this.player.x, this.player.z, this.player.radius,
-      this.player.isAlive, this.objects.getObjects(), this.renderer.camera
-    );
+    if (this.gameMode !== 'multiplayer') {
+      this.enemies.update(
+        dt, time, this.player.x, this.player.z, this.player.radius,
+        this.player.isAlive, this.spatialGrid, this.renderer.camera,
+        this.freezeTimer > 0
+      );
+    } else {
+      // Broadcast player state to server
+      if (this.socket?.connected) {
+        this.socket.emit('update', {
+          x: this.player.x,
+          z: this.player.z,
+          radius: this.player.radius,
+          score: this.player.score,
+          vx: this.player.vx,
+          vz: this.player.vz,
+          isAlive: this.player.isAlive
+        });
+      }
+
+      // Update remote player meshes and labels
+      this.remotePlayers.forEach((rp) => {
+        rp.hole.update(dt, 0, 0, time, false);
+        rp.hole.mesh.position.set(rp.hole.x, 0.5, rp.hole.z);
+        rp.hole.glowLight.position.set(rp.hole.x, 10, rp.hole.z);
+        rp.hole.mesh.visible = rp.hole.isAlive;
+        rp.hole.glowLight.visible = rp.hole.isAlive;
+
+        if (rp.hole.isAlive) {
+          const pos = new THREE.Vector3(rp.hole.x, 20, rp.hole.z);
+          pos.project(this.renderer.camera);
+          const px = (pos.x * 0.5 + 0.5) * window.innerWidth;
+          const py = (-pos.y * 0.5 + 0.5) * window.innerHeight;
+          if (pos.z < 1) {
+            rp.labelDiv.style.display = 'block';
+            rp.labelDiv.style.left = `${px}px`;
+            rp.labelDiv.style.top = `${py - 20}px`;
+            rp.labelDiv.style.transform = 'translateX(-50%)';
+          } else {
+            rp.labelDiv.style.display = 'none';
+          }
+        } else {
+          rp.labelDiv.style.display = 'none';
+        }
+      });
+    }
+
+    // ─── Hazards update ───
+    this.hazards.update(dt, this.player, this.enemies.getEnemies(), this.camera, this.gameMode === 'multiplayer', this.socket);
 
     // ─── Collisions ───
     this.handleCollisions(dt);
@@ -321,7 +546,10 @@ export class Game {
       this.hud.updateScore(this.player.score);
       this.hud.updateSize(this.player.radius);
 
-      const lb: LeaderboardEntry[] = [
+      const lb: LeaderboardEntry[] = this.gameMode === 'multiplayer' ? [
+        { name: 'You', score: this.player.score, isPlayer: true },
+        ...Array.from(this.remotePlayers.values()).map(rp => ({ name: rp.labelDiv.textContent || 'Player', score: rp.hole.score, isPlayer: false }))
+      ].sort((a, b) => b.score - a.score) : [
         { name: 'You', score: this.player.score, isPlayer: true },
         ...this.enemies.getEnemies().map(e => ({ name: e.name, score: e.score, isPlayer: false })),
       ].sort((a, b) => b.score - a.score);
@@ -333,21 +561,28 @@ export class Game {
   }
 
   private handleCollisions(dt: number): void {
-    const objs = this.objects.getObjects();
     const enemies = this.enemies.getEnemies();
-    const mapDef = MAP_DEFINITIONS.find(m => m.id === this.selectedMapId) || MAP_DEFINITIONS[0];
 
     // ─── Player ↔ Objects ───
     if (this.player.isAlive) {
-      for (const obj of objs) {
+      let pull = this.player.radius * 1.5;
+      if (this.magnetTimer > 0) pull *= 2.0;
+      if (storage.getActivePerk() === 'MAGNET_PERK') pull *= 1.25;
+      if (this.pulseTimer > 0) pull = Math.max(pull, 800);
+      
+      const nearbyObjs = this.spatialGrid.query(this.player.x, this.player.z, pull);
+      for (const obj of nearbyObjs) {
         if (obj.isEaten) continue;
         const dist = distance(obj.x, obj.z, this.player.x, this.player.z);
-        let pull = this.player.radius * 1.5;
-        if (this.magnetTimer > 0) pull *= 2.0;
+        let objPull = this.player.radius * 1.5;
+        if (this.magnetTimer > 0) objPull *= 2.0;
+        if (storage.getActivePerk() === 'MAGNET_PERK') objPull *= 1.25;
+        if (this.pulseTimer > 0) objPull = Math.max(objPull, 800);
 
-        if (dist < pull && this.player.radius > obj.type.size - 2) {
+        if (dist < objPull && this.player.radius > obj.type.size - 2) {
           // Gravitational pull
-          const force = Math.max(0.1, 1 - dist / pull) * 7;
+          const pullForce = this.pulseTimer > 0 ? 15 : 7;
+          const force = Math.max(0.1, 1 - dist / objPull) * pullForce;
           const angle = Math.atan2(this.player.z - obj.z, this.player.x - obj.x);
           obj.x += Math.cos(angle) * force;
           obj.z += Math.sin(angle) * force;
@@ -409,11 +644,13 @@ export class Game {
             haptics.vibrateBotKill();
           } else if (enemy.radius > this.player.radius + 8) {
             // Bot eats player
-            this.player.kill();
-            enemy.score += 450;
-            enemy.targetRadius = Math.min(MAX_HOLE_RADIUS, enemy.targetRadius + 22);
-            this.particles.emitBurst(this.player.x, this.player.z, '#2FF5FF', 25);
-            this.camera.addTrauma(0.5);
+            if (this.ghostTimer <= 0) {
+              this.player.kill();
+              enemy.score += 450;
+              enemy.targetRadius = Math.min(MAX_HOLE_RADIUS, enemy.targetRadius + 22);
+              this.particles.emitBurst(this.player.x, this.player.z, '#2FF5FF', 25);
+              this.camera.addTrauma(0.5);
+            }
           }
         }
       }
@@ -433,7 +670,14 @@ export class Game {
           if (pw.type === 'MAGNET') this.magnetTimer = 15;
           else if (pw.type === 'SPEED') this.speedTimer = 15;
           else if (pw.type === 'MULTIPLIER') this.multiplierTimer = 15;
-          this.hud.updatePowerups(this.magnetTimer, this.speedTimer, this.multiplierTimer);
+          else if (pw.type === 'FREEZE') this.freezeTimer = 10;
+          else if (pw.type === 'GHOST') this.ghostTimer = 10;
+          else if (pw.type === 'PULSE') this.pulseTimer = 2;
+          
+          this.hud.updatePowerups(
+            this.magnetTimer, this.speedTimer, this.multiplierTimer,
+            this.freezeTimer, this.ghostTimer, this.pulseTimer
+          );
         }
       }
     }
@@ -441,7 +685,8 @@ export class Game {
     // ─── Enemy ↔ Objects ───
     for (const enemy of enemies) {
       if (!enemy.isAlive) continue;
-      for (const obj of objs) {
+      const nearbyObjs = this.spatialGrid.query(enemy.x, enemy.z, enemy.radius);
+      for (const obj of nearbyObjs) {
         if (obj.isEaten) continue;
         const dist = distance(obj.x, obj.z, enemy.x, enemy.z);
         if (dist < enemy.radius && enemy.radius > obj.type.size - 2) {
@@ -577,6 +822,25 @@ export class Game {
       z = rand(radius + 50, MAP_SIZE - radius - 50);
     } while (Math.hypot(x - MAP_SIZE / 2, z - MAP_SIZE / 2) < 300);
     return { x, z };
+  }
+
+  private addRemotePlayer(id: string, data: any): void {
+    const hole = new Hole(this.renderer.scene, data.skin);
+    hole.reset(data.skin);
+    hole.x = data.x;
+    hole.z = data.z;
+    hole.radius = data.radius;
+    hole.targetRadius = data.radius;
+    hole.score = data.score;
+    hole.isAlive = data.isAlive;
+
+    const labelDiv = document.createElement('div');
+    labelDiv.className = 'bot-label remote-player-label';
+    labelDiv.textContent = data.name;
+    labelDiv.style.cssText = `position:fixed;pointer-events:none;font-family:'Bebas Neue',sans-serif;font-size:14px;color:#fff;text-shadow:0 0 8px #FF00FF;z-index:10;display:none;white-space:nowrap;`;
+    document.getElementById('app')?.appendChild(labelDiv);
+
+    this.remotePlayers.set(id, { hole, labelDiv });
   }
 
   private hexToRgb(hex: string): { r: number; g: number; b: number } {

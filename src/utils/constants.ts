@@ -130,6 +130,9 @@ export const POWERUP_TYPES: Record<string, PowerupType> = {
   MAGNET: { type: 'MAGNET', color: '#FF3300', neonColor: '#FF5533', symbol: '🧲', label: 'GRAVITY OVERLOAD' },
   SPEED: { type: 'SPEED', color: '#33FF33', neonColor: '#55FF55', symbol: '⚡', label: 'WARP BOOST' },
   MULTIPLIER: { type: 'MULTIPLIER', color: '#FFCC00', neonColor: '#FFDD33', symbol: '💎', label: 'DARK ENERGY' },
+  FREEZE: { type: 'FREEZE', color: '#00F5FF', neonColor: '#33FFFF', symbol: '❄️', label: 'CHRONO FREEZE' },
+  GHOST: { type: 'GHOST', color: '#E0115F', neonColor: '#FF00FF', symbol: '👻', label: 'VOID PHASE' },
+  PULSE: { type: 'PULSE', color: '#FFFFFF', neonColor: '#DDDDDD', symbol: '🌀', label: 'VOID PULSE' },
 };
 
 // ─── Skins ───
@@ -165,3 +168,36 @@ export const COLORS = {
   voidDark: '#0D0015',
   voidMid: '#1A0030',
 };
+
+// ─── Custom Trails ───
+export interface TrailDef {
+  id: string;
+  name: string;
+  desc: string;
+  cost: number;
+  primary: string;
+  secondary: string;
+}
+
+export const TRAILS: TrailDef[] = [
+  { id: 'SPARKS', name: 'Default Sparks', desc: 'Standard neon vortex grid particles', cost: 0, primary: '#7B2FFF', secondary: '#2FF5FF' },
+  { id: 'FIRE', name: 'Plasma Firewall', desc: 'Fiery arcade orange thermal loops', cost: 200, primary: '#FF5500', secondary: '#FFCC00' },
+  { id: 'MATRIX', name: '8-Bit Code Cascade', desc: 'Retro green digital streams', cost: 400, primary: '#33FF33', secondary: '#004400' },
+  { id: 'COSMIC', name: 'Galaxy Stardust', desc: 'Glowing nebula dust particles', cost: 600, primary: '#CC00FF', secondary: '#00FFFF' }
+];
+
+// ─── Starting Perks ───
+export interface PerkDef {
+  id: string;
+  name: string;
+  desc: string;
+  cost: number;
+  effect: 'size' | 'magnet' | 'speed';
+  label: string;
+}
+
+export const PERKS: PerkDef[] = [
+  { id: 'SIZE_PERK', name: 'Gravity Surge', desc: 'Start the match with +5 size bonus', cost: 250, effect: 'size', label: '+5 START SIZE' },
+  { id: 'MAGNET_PERK', name: 'Overcharged Core', desc: 'Increase magnet range by +25%', cost: 350, effect: 'magnet', label: '+25% MAGNET RANGE' },
+  { id: 'SPEED_PERK', name: 'Tachyon Glide', desc: 'Increase base movement speed by +15%', cost: 450, effect: 'speed', label: '+15% SPEED BOOST' }
+];

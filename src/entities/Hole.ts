@@ -19,6 +19,7 @@ export class Hole {
   public eatenBotsCount = 0;
   public vx = 0;
   public vz = 0;
+  public speedMultiplier = 1.0;
   private drag = 0.88;
   private acceleration = 2.0;
   private breathPhase = 0;
@@ -65,6 +66,7 @@ export class Hole {
     this.radius = INITIAL_PLAYER_RADIUS; this.targetRadius = INITIAL_PLAYER_RADIUS;
     this.score = 0; this.level = 0; this.isAlive = true; this.respawnTimer = 0;
     this.eatenBotsCount = 0; this.vx = 0; this.vz = 0; this.absorbFlash = 0;
+    this.speedMultiplier = 1.0;
     this.skinId = skinId;
     const skin = SKINS.find(s => s.id === skinId) || SKINS[0];
     const p = this.hex(skin.primary); const s2 = this.hex(skin.secondary);
@@ -80,7 +82,7 @@ export class Hole {
       return;
     }
     this.mesh.visible = true; this.glowLight.visible = true;
-    let speed = getBaseSpeed(this.radius);
+    let speed = getBaseSpeed(this.radius) * this.speedMultiplier;
     if (speedBoost) speed *= 1.6;
     this.vx += inputDx * speed * this.acceleration * dt;
     this.vz += inputDy * speed * this.acceleration * dt;
