@@ -7,6 +7,7 @@ export type MenuCallback = (mode: GameMode, mapId: string, skinId: string) => vo
 export class MainMenu {
   private el: HTMLDivElement;
   private onPlay: MenuCallback | null = null;
+  private onMapSelect: ((mapId: string) => void) | null = null;
   private selectedMapId: string;
   private equippedSkin: string;
   private darkMatter: number;
@@ -35,6 +36,7 @@ export class MainMenu {
   }
 
   setOnPlay(cb: MenuCallback): void { this.onPlay = cb; }
+  setOnMapSelect(cb: (mapId: string) => void): void { this.onMapSelect = cb; }
 
   show(): void {
     this.darkMatter = storage.getDarkMatter();
@@ -50,6 +52,9 @@ export class MainMenu {
   }
 
   hide(): void { this.el.classList.add('hidden'); }
+
+  private activeTab: 'skins' | 'trails' | 'perks' | 'maps' = 'skins';
+  private mobileActiveTab: 'play' | 'customize' = 'play';
 
   private render(): void {
     const skinCards = SKINS.map(s => {
@@ -109,40 +114,59 @@ export class MainMenu {
     }).join('');
 
     this.el.innerHTML = `
-      <div class="menu-title">CYBER<span>VORTEX</span></div>
-      <div class="menu-subtitle">Consume Everything.</div>
-      <div class="menu-currency">💎 ${this.darkMatter} DARK MATTER</div>
+      <div class="mobile-tabs-header">
+        <button class="mobile-tab-btn${this.mobileActiveTab === 'play' ? ' active' : ''}" data-mobile-tab="play">🎮 BATTLE</button>
+        <button class="mobile-tab-btn${this.mobileActiveTab === 'customize' ? ' active' : ''}" data-mobile-tab="customize">🛡️ CUSTOMIZE</button>
+      </div>
+      <div class="menu-container ${this.mobileActiveTab === 'play' ? 'show-play' : 'show-customize'}">
+        <!-- LEFT COLUMN: Brand & Modes -->
+        <div class="menu-left">
+          <div class="menu-brand">
+            <div class="menu-title">CYBER<span>VORTEX</span></div>
+            <div class="menu-subtitle">Consume Everything.</div>
+            <div class="menu-currency">💎 ${this.darkMatter} DARK MATTER</div>
+          </div>
 
-      <div class="menu-section-title">SELECT SINGULARITY SKIN</div>
-      <div class="skin-scroll">${skinCards}</div>
-
-      <div class="menu-section-title">SELECT COSMETIC TRAIL</div>
-      <div class="skin-scroll">${trailCards}</div>
-
-      <div class="menu-section-title">CHOOSE STARTING PERK</div>
-      <div class="skin-scroll">${perkCards}</div>
-
-      <div class="menu-section-title">SELECT ARENA</div>
-      <div class="map-scroll">${mapCards}</div>
-
-      <div class="mode-buttons">
-        <div class="mode-btn" data-mode="classic">
-          <div class="mode-btn-title">⚡ CLASSIC RUN</div>
-          <div class="mode-btn-desc">2 minute score race against bots</div>
-          <div class="mode-btn-high">BEST: ${this.highScores.classic || 0} pts</div>
+          <div class="menu-section-title">SELECT GAME MODE</div>
+          <div class="mode-buttons">
+            <div class="mode-btn" data-mode="classic">
+              <div class="mode-btn-title">⚡ CLASSIC RUN</div>
+              <div class="mode-btn-desc">2 minute score race against bots</div>
+              <div class="mode-btn-high">BEST: ${this.highScores.classic || 0} pts</div>
+            </div>
+            <div class="mode-btn" data-mode="royale">
+              <div class="mode-btn-title">💥 BATTLE ROYALE</div>
+              <div class="mode-btn-desc">Outlast competitors in shrinking boundaries</div>
+              <div class="mode-btn-high">BEST: ${this.highScores.royale || 0} pts</div>
+            </div>
+            <div class="mode-btn multiplayer-btn" data-mode="multiplayer">
+              <div class="mode-btn-title">🌐 ONLINE MULTIPLAYER</div>
+              <div class="mode-btn-desc">Play real-time room matches with friends & bots</div>
+            </div>
+            <div class="mode-btn" data-mode="sandbox">
+              <div class="mode-btn-title">🌌 INFINITE SANDBOX</div>
+              <div class="mode-btn-desc">Stress-free cosmic void. Grow infinitely.</div>
+            </div>
+          </div>
         </div>
-        <div class="mode-btn" data-mode="royale">
-          <div class="mode-btn-title">💥 BATTLE ROYALE</div>
-          <div class="mode-btn-desc">Outlast competitors in shrinking boundaries</div>
-          <div class="mode-btn-high">BEST: ${this.highScores.royale || 0} pts</div>
-        </div>
-        <div class="mode-btn" data-mode="multiplayer" style="border-color: var(--accent); background: rgba(255, 47, 190, 0.05)">
-          <div class="mode-btn-title" style="color: var(--accent)">🌐 ONLINE MULTIPLAYER</div>
-          <div class="mode-btn-desc">Play in real-time online against your friends</div>
-        </div>
-        <div class="mode-btn" data-mode="sandbox">
-          <div class="mode-btn-title">🌌 INFINITE SANDBOX</div>
-          <div class="mode-btn-desc">Stress-free cosmic void. Grow infinitely.</div>
+
+        <!-- RIGHT COLUMN: Customization Tabs -->
+        <div class="menu-right">
+          <div class="menu-tabs">
+            <div class="menu-tab-btn${this.activeTab === 'skins' ? ' active' : ''}" data-tab="skins">🛡️ SKINS</div>
+            <div class="menu-tab-btn${this.activeTab === 'trails' ? ' active' : ''}" data-tab="trails">✨ TRAILS</div>
+            <div class="menu-tab-btn${this.activeTab === 'perks' ? ' active' : ''}" data-tab="perks">⚡ PERKS</div>
+            <div class="menu-tab-btn${this.activeTab === 'maps' ? ' active' : ''}" data-tab="maps">🗺️ MAPS</div>
+          </div>
+
+          <div class="tab-content-container">
+            ${
+              this.activeTab === 'skins' ? `<div class="skin-grid">${skinCards}</div>` :
+              this.activeTab === 'trails' ? `<div class="skin-grid">${trailCards}</div>` :
+              this.activeTab === 'perks' ? `<div class="skin-grid">${perkCards}</div>` :
+              `<div class="map-grid">${mapCards}</div>`
+            }
+          </div>
         </div>
       </div>
     `;
@@ -155,10 +179,18 @@ export class MainMenu {
       });
     });
 
+    this.el.querySelectorAll('[data-tab]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this.activeTab = (btn as HTMLElement).dataset.tab as any;
+        this.render();
+      });
+    });
+
     this.el.querySelectorAll('[data-map]').forEach(btn => {
       btn.addEventListener('click', () => {
         this.selectedMapId = (btn as HTMLElement).dataset.map!;
         this.render();
+        this.onMapSelect?.(this.selectedMapId);
       });
     });
 
@@ -238,6 +270,14 @@ export class MainMenu {
         storage.setDarkMatter(this.darkMatter);
         storage.setUnlockedPerks(this.unlockedPerks);
         storage.setActivePerk(perkId);
+        this.render();
+      });
+    });
+
+    // Mobile tab switcher listeners
+    this.el.querySelectorAll('[data-mobile-tab]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this.mobileActiveTab = (btn as HTMLElement).dataset.mobileTab as 'play' | 'customize';
         this.render();
       });
     });

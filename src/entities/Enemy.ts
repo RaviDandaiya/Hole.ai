@@ -21,6 +21,7 @@ export interface EnemyData {
   vx: number;
   vz: number;
   mesh: THREE.Mesh;
+  voidMesh: THREE.Mesh;
   glowLight: THREE.PointLight;
   material: THREE.ShaderMaterial;
   labelDiv: HTMLDivElement | null;
@@ -57,9 +58,36 @@ export class EnemyManager {
       mesh.rotation.x = -Math.PI / 2;
       const spawnX = rand(200, MAP_SIZE - 200);
       const spawnZ = rand(200, MAP_SIZE - 200);
-      mesh.position.set(spawnX, 0.3, spawnZ);
+      mesh.position.set(spawnX, -0.2, spawnZ); // recessed slightly below ground cutout
       mesh.scale.set(INITIAL_PLAYER_RADIUS * 2.5, INITIAL_PLAYER_RADIUS * 2.5, 1);
       this.scene.add(mesh);
+
+      // Bot 3D void cylinder
+      const cylinderGeo = new THREE.CylinderGeometry(1, 0.75, 1, 16, 1, true);
+      const colors = [];
+      const positionAttr = cylinderGeo.attributes.position;
+      const tempColor = new THREE.Color();
+      const primaryColor = new THREE.Color(color);
+      for (let j = 0; j < positionAttr.count; j++) {
+        const y = positionAttr.getY(j);
+        if (y > 0) tempColor.copy(primaryColor);
+        else tempColor.set(0x000000);
+        colors.push(tempColor.r, tempColor.g, tempColor.b);
+      }
+      cylinderGeo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+      const cylinderMat = new THREE.MeshBasicMaterial({
+        vertexColors: true,
+        side: THREE.BackSide,
+        transparent: true,
+        opacity: 0.95,
+        depthWrite: true
+      });
+
+      const voidMesh = new THREE.Mesh(cylinderGeo, cylinderMat);
+      voidMesh.position.set(spawnX, -40, spawnZ);
+      voidMesh.scale.set(INITIAL_PLAYER_RADIUS, 80, INITIAL_PLAYER_RADIUS);
+      this.scene.add(voidMesh);
 
       const light = new THREE.PointLight(new THREE.Color(color).getHex(), 0.5, INITIAL_PLAYER_RADIUS * 3);
       light.position.set(spawnX, 8, spawnZ);
@@ -76,7 +104,7 @@ export class EnemyManager {
         id: i, name, color, x: spawnX, z: spawnZ,
         radius: INITIAL_PLAYER_RADIUS, targetRadius: INITIAL_PLAYER_RADIUS,
         score: 0, level: 0, isAlive: true, respawnTimer: 0, targetTimer: 0,
-        vx: 0, vz: 0, mesh, glowLight: light, material: mat, labelDiv,
+        vx: 0, vz: 0, mesh, voidMesh, glowLight: light, material: mat, labelDiv,
       });
     }
   }
@@ -85,20 +113,26 @@ export class EnemyManager {
     for (const bot of this.enemies) {
       if (!bot.isAlive) {
         bot.respawnTimer -= dt * 1000;
-        bot.mesh.visible = false; bot.glowLight.visible = false;
+        bot.mesh.visible = false;
+        bot.voidMesh.visible = false;
+        bot.glowLight.visible = false;
         if (bot.labelDiv) bot.labelDiv.style.display = 'none';
         if (bot.respawnTimer <= 0) {
           bot.x = rand(200, MAP_SIZE - 200); bot.z = rand(200, MAP_SIZE - 200);
           bot.isAlive = true; bot.radius = INITIAL_PLAYER_RADIUS; bot.targetRadius = INITIAL_PLAYER_RADIUS;
           bot.score = Math.floor(bot.score * 0.45); bot.level = 0;
+          bot.voidMesh.position.set(bot.x, -40, bot.z);
+          bot.voidMesh.scale.set(bot.radius, 80, bot.radius);
         }
         continue;
       }
 
-      bot.mesh.visible = true; bot.glowLight.visible = true;
+      bot.mesh.visible = true;
+      bot.voidMesh.visible = true;
+      bot.glowLight.visible = true;
       if (bot.radius < bot.targetRadius) bot.radius = Math.min(bot.targetRadius, bot.radius + 0.35);
 
-      let speed = isFrozen ? 0 : getBaseSpeed(bot.radius) * 0.96;
+      let speed = isFrozen ? 0 : getBaseSpeed(bot.radius) * 0.15;
       if (isFrozen) {
         bot.vx = 0; bot.vz = 0;
       }
@@ -238,8 +272,10 @@ export class EnemyManager {
       }
 
       const sc = bot.radius * 2.5;
-      bot.mesh.position.set(bot.x, 0.3, bot.z);
+      bot.mesh.position.set(bot.x, -0.2, bot.z); // recessed
       bot.mesh.scale.set(sc, sc, 1);
+      bot.voidMesh.position.set(bot.x, -40, bot.z);
+      bot.voidMesh.scale.set(bot.radius, 80, bot.radius);
       bot.glowLight.position.set(bot.x, 8, bot.z);
       bot.glowLight.intensity = 0.3 + bot.radius * 0.005;
       bot.glowLight.distance = bot.radius * 3;
@@ -265,8 +301,9 @@ export class EnemyManager {
 
   clear(): void {
     for (const e of this.enemies) {
-      this.scene.remove(e.mesh); this.scene.remove(e.glowLight);
+      this.scene.remove(e.mesh); this.scene.remove(e.glowLight); this.scene.remove(e.voidMesh);
       e.mesh.geometry.dispose(); e.material.dispose();
+      e.voidMesh.geometry.dispose(); (e.voidMesh.material as THREE.Material).dispose();
       if (e.labelDiv) e.labelDiv.remove();
     }
     this.enemies = [];

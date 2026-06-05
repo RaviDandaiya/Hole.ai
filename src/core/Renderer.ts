@@ -29,7 +29,9 @@ const VignetteShader = {
       vec2 uv = (vUv - 0.5) * 2.0;
       float vig = 1.0 - dot(uv * uOffset * 0.5, uv * uOffset * 0.5);
       vig = clamp(vig, 0.0, 1.0);
-      color.rgb *= mix(1.0 - uDarkness, 1.0, vig);
+      float factor = mix(1.0 - uDarkness, 1.0, vig);
+      color.rgb *= max(0.0, factor);
+      color.rgb = max(vec3(0.0), color.rgb);
       gl_FragColor = color;
     }
   `,
@@ -91,6 +93,7 @@ const FilmGrainShader = {
       vec4 color = texture2D(tDiffuse, vUv);
       float noise = random(vUv + uTime) * uAmount;
       color.rgb += noise - uAmount * 0.5;
+      color.rgb = max(vec3(0.0), color.rgb);
       gl_FragColor = color;
     }
   `,

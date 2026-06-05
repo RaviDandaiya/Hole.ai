@@ -27,6 +27,7 @@ import { SpatialGrid } from '../utils/SpatialGrid';
 import groundVertShader from '../shaders/ground.vert.glsl';
 import groundFragShader from '../shaders/ground.frag.glsl';
 import { io, Socket } from 'socket.io-client';
+import { MultiplayerLobby } from '../ui/MultiplayerLobby';
 
 interface PowerupInstance {
   type: string; x: number; z: number; color: string; symbol: string; label: string;
@@ -57,6 +58,7 @@ export class Game {
   private gameMode: GameMode = 'classic';
   private selectedMapId: string = MAP_DEFINITIONS[0].id;
   private equippedSkin: string = 'NEON';
+  private isPaused = false;
   private timeLeft: number = GAME_DURATION;
   private timerInterval: number = 0;
   private powerups: PowerupInstance[] = [];
@@ -71,6 +73,8 @@ export class Game {
   private spatialGrid = new SpatialGrid<any>(200);
   private socket: Socket | null = null;
   private remotePlayers: Map<string, { hole: Hole; labelDiv: HTMLDivElement }> = new Map();
+  private lobby: MultiplayerLobby;
+  private isHost = false;
 
   // Ground
   private groundMaterial!: THREE.ShaderMaterial;
@@ -93,6 +97,7 @@ export class Game {
     this.gameOverScreen = new GameOverScreen();
     this.joystick = new VirtualJoystick();
     this.sizeUpCelebration = new SizeUpCelebration();
+    this.lobby = new MultiplayerLobby();
 
     // ─── Entities ───
     this.player = new Hole(this.renderer.scene, storage.getEquippedSkin());
@@ -113,11 +118,30 @@ export class Game {
     this.mainMenu.setOnPlay((mode, mapId, skinId) => {
       this.startGame(mode, mapId, skinId);
     });
+    this.mainMenu.setOnMapSelect((mapId) => {
+      this.selectedMapId = mapId;
+      const mapDef = MAP_DEFINITIONS.find(m => m.id === mapId);
+      if (mapDef) {
+        this.updateGroundColors(mapDef);
+      }
+    });
     this.gameOverScreen.setCallbacks(
       () => this.startGame(this.gameMode, this.selectedMapId, this.equippedSkin),
       () => this.showMenu()
     );
     this.hud.setOnMuteToggle(() => this.audio.toggleMute());
+    this.hud.setOnExitClick(() => {
+      this.isPaused = true;
+      this.audio.stopAmbient();
+    });
+    this.hud.setOnExitCancel(() => {
+      this.isPaused = false;
+      this.audio.startAmbient();
+    });
+    this.hud.setOnExitConfirm(() => {
+      this.isPaused = false;
+      this.showMenu();
+    });
 
     // ─── Start ───
     this.init();
@@ -138,8 +162,10 @@ export class Game {
     this.state = GameState.MENU;
     this.mainMenu.show();
     this.hud.hide();
+    this.lobby.hide();
     this.gameOverScreen.hide();
     this.player.mesh.visible = false;
+    this.player.voidMesh.visible = false;
     this.player.glowLight.visible = false;
     this.enemies.clear();
     this.objects.clear();
@@ -148,6 +174,14 @@ export class Game {
     if (this.timerInterval) clearInterval(this.timerInterval);
     this.audio.stopAmbient();
 
+    if (this.groundMaterial) {
+      this.groundMaterial.uniforms.uHolesCount.value = 0;
+    }
+
+    // Restore ground colors to match active selected map
+    const mapDef = MAP_DEFINITIONS.find(m => m.id === this.selectedMapId) || MAP_DEFINITIONS[0];
+    this.updateGroundColors(mapDef);
+
     if (this.socket) {
       this.socket.disconnect();
       this.socket = null;
@@ -155,6 +189,7 @@ export class Game {
     this.remotePlayers.forEach(rp => {
       rp.hole.dispose();
       this.renderer.scene.remove(rp.hole.mesh);
+      this.renderer.scene.remove(rp.hole.voidMesh);
       this.renderer.scene.remove(rp.hole.glowLight);
       rp.labelDiv.remove();
     });
@@ -166,13 +201,48 @@ export class Game {
     this.gameMode = mode;
     this.selectedMapId = mapId;
     this.equippedSkin = skinId;
-    this.state = GameState.PLAYING;
 
+    const mapDef = MAP_DEFINITIONS.find(m => m.id === mapId) || MAP_DEFINITIONS[0];
+
+    if (mode === 'multiplayer') {
+      this.state = GameState.MENU;
+      this.mainMenu.hide();
+      this.gameOverScreen.hide();
+      this.hud.hide();
+      
+      this.lobby.showSetup();
+      this.lobby.setCallbacks(
+        (name) => {
+          this.socket = io('http://localhost:3002');
+          this.setupSocketEvents(mapDef);
+          this.socket.on('connect', () => {
+            this.socket!.emit('createRoom', { name, skin: this.equippedSkin });
+          });
+        },
+        (name, code) => {
+          this.socket = io('http://localhost:3002');
+          this.setupSocketEvents(mapDef);
+          this.socket.on('connect', () => {
+            this.socket!.emit('joinRoom', { name, roomCode: code, skin: this.equippedSkin });
+          });
+        },
+        () => {
+          if (this.socket && this.isHost) {
+            this.socket.emit('startMatch');
+          }
+        },
+        () => {
+          this.showMenu();
+        }
+      );
+      return;
+    }
+
+    this.state = GameState.PLAYING;
     this.mainMenu.hide();
     this.gameOverScreen.hide();
     this.hud.show();
-
-    const mapDef = MAP_DEFINITIONS.find(m => m.id === mapId) || MAP_DEFINITIONS[0];
+    this.isPaused = false;
 
     // Reset player
     this.player.reset(skinId);
@@ -187,120 +257,8 @@ export class Game {
     }
     this.player.speedMultiplier = activePerk === 'SPEED_PERK' ? 1.15 : 1.0;
 
-    if (mode === 'multiplayer') {
-      this.socket = io('http://localhost:3002');
-      
-      this.socket.on('init', (data) => {
-        this.objects.populateFromShared(data.objects, mapDef.objects);
-        
-        this.socket!.emit('join', {
-          name: storage.loadData('player_name') || 'You',
-          skin: this.equippedSkin
-        });
-        
-        Object.keys(data.players).forEach(id => {
-          if (id !== this.socket!.id) {
-            this.addRemotePlayer(id, data.players[id]);
-          }
-        });
-      });
-
-      this.socket.on('playerJoined', (data) => {
-        if (data.id !== this.socket!.id) {
-          this.addRemotePlayer(data.id, data);
-        }
-      });
-
-      this.socket.on('playerUpdated', (data) => {
-        const rp = this.remotePlayers.get(data.id);
-        if (rp) {
-          rp.hole.x = data.x;
-          rp.hole.z = data.z;
-          rp.hole.targetRadius = data.radius;
-          rp.hole.score = data.score;
-          rp.hole.isAlive = data.isAlive;
-        }
-      });
-
-      this.socket.on('playerDisconnected', (id) => {
-        const rp = this.remotePlayers.get(id);
-        if (rp) {
-          rp.hole.dispose();
-          this.renderer.scene.remove(rp.hole.mesh);
-          this.renderer.scene.remove(rp.hole.glowLight);
-          rp.labelDiv.remove();
-          this.remotePlayers.delete(id);
-        }
-      });
-
-      this.socket.on('objectEaten', (data) => {
-        const { objectId, eaterId, x, z } = data;
-        const obj = this.objects.getObjects().find(o => o.id === objectId);
-        if (obj && !obj.isEaten) {
-          obj.isEaten = true;
-          obj.swallowProgress = 0.05;
-          obj.eaterX = x;
-          obj.eaterZ = z;
-          
-          this.particles.emitBurst(obj.x, obj.z, obj.type.neonColor, 15);
-          this.audio.playAbsorbSmall(obj.type.size / 145);
-          
-          if (eaterId !== this.socket!.id) {
-            const rp = this.remotePlayers.get(eaterId);
-            if (rp) rp.hole.addScore(obj.type.score, obj.type.growth);
-          }
-        }
-      });
-
-      this.socket.on('objectRespawned', (data) => {
-        const { objectId, x, z } = data;
-        const obj = this.objects.getObjects().find(o => o.id === objectId);
-        if (obj) {
-          obj.x = x; obj.z = z;
-          obj.isEaten = false; obj.swallowProgress = 0;
-          obj.spinSpeed = 0; obj.tiltX = 0; obj.tiltZ = 0;
-          obj.mesh.scale.setScalar(1);
-          obj.mesh.rotation.set(0, 0, 0);
-          obj.mesh.position.set(x, 0, z);
-          obj.justRespawned = true;
-        }
-      });
-
-      this.socket.on('playerEaten', (data) => {
-        const { targetId, eaterId } = data;
-        if (targetId === this.socket!.id) {
-          this.player.kill();
-          this.particles.emitBurst(this.player.x, this.player.z, '#FF00FF', 25);
-          this.camera.addTrauma(0.5);
-          
-          setTimeout(() => {
-            if (this.state === GameState.PLAYING) {
-              const sp = this.getSafeSpawn(this.player.radius);
-              this.player.respawn(sp.x, sp.z);
-              this.socket!.emit('respawn');
-            }
-          }, 3500);
-        } else {
-          const rp = this.remotePlayers.get(targetId);
-          if (rp) {
-            rp.hole.isAlive = false;
-            this.particles.emitBurst(rp.hole.x, rp.hole.z, '#2FF5FF', 25);
-          }
-          if (eaterId === this.socket!.id) {
-            this.player.addScore(450, 22);
-            this.camera.addTrauma(0.4);
-            this.audio.playBotKill();
-            haptics.vibrateBotKill();
-          } else {
-            const eater = this.remotePlayers.get(eaterId);
-            if (eater) eater.hole.addScore(450, 22);
-          }
-        }
-      });
-    } else {
-      this.objects.populate(mapDef.objects, MAP_SIZE);
-      this.enemies.createBots(BOT_COUNT);
-    }
+    this.objects.populate(mapDef.objects, MAP_SIZE);
+    this.enemies.createBots(BOT_COUNT);
 
     // Reset powerups
     this.clearPowerups();
@@ -337,7 +295,207 @@ export class Game {
     }
   }
 
+  private startMultiplayerMatch(data: any, mapDef: MapDefinition): void {
+    this.state = GameState.PLAYING;
+    this.lobby.hide();
+    this.hud.show();
+    this.isPaused = false;
+
+    // Reset player
+    this.player.reset(this.equippedSkin);
+    this.prevLevel = 0;
+
+    // Apply starting perks
+    const activePerk = storage.getActivePerk();
+    if (activePerk === 'SIZE_PERK') {
+      this.player.radius = 29;
+      this.player.targetRadius = 29;
+      this.player.mesh.scale.set(29 * 2.5, 29 * 2.5, 1);
+    }
+    this.player.speedMultiplier = activePerk === 'SPEED_PERK' ? 1.15 : 1.0;
+
+    // Populate objects
+    this.objects.populateFromShared(data.objects, mapDef.objects);
+
+    // Add initial remote players (humans)
+    Object.keys(data.players).forEach(id => {
+      if (id !== this.socket!.id) {
+        this.addRemotePlayer(id, data.players[id]);
+      }
+    });
+
+    // If host, create remaining slots as bots
+    if (this.isHost) {
+      const humanCount = Object.keys(data.players).length;
+      const botCountToSpawn = Math.max(0, 6 - humanCount);
+      console.log(`Spawning ${botCountToSpawn} bots in room as Host`);
+      this.enemies.createBots(botCountToSpawn);
+    }
+
+    // Reset powerups
+    this.clearPowerups();
+    this.magnetTimer = 0;
+    this.speedTimer = 0;
+    this.multiplierTimer = 0;
+    this.freezeTimer = 0;
+    this.ghostTimer = 0;
+    this.pulseTimer = 0;
+
+    // Update ground colors
+    this.updateGroundColors(mapDef);
+
+    // Timer
+    this.timeLeft = GAME_DURATION;
+    this.hud.updateTimer(this.timeLeft);
+    this.hud.updateScore(0);
+    this.hud.updateSize(this.player.radius);
+
+    this.timerInterval = window.setInterval(() => this.timerTick(), 1000);
+
+    // Audio
+    this.audio.startAmbient();
+
+    // Keyboard hint
+    if (!isMobileDevice()) {
+      this.keyboardHint = document.createElement('div');
+      this.keyboardHint.className = 'keyboard-hint';
+      this.keyboardHint.textContent = '⌨️ WASD / Arrows or mouse drag to steer';
+      document.getElementById('app')!.appendChild(this.keyboardHint);
+      setTimeout(() => { if (this.keyboardHint) { this.keyboardHint.style.opacity = '0'; setTimeout(() => this.keyboardHint?.remove(), 500); } }, 5000);
+    }
+  }
+
+  private setupSocketEvents(mapDef: MapDefinition): void {
+    if (!this.socket) return;
+
+    this.socket.on('roomCreated', (data) => {
+      this.isHost = true;
+      this.lobby.showLobby(data.roomCode, true, data.players);
+    });
+
+    this.socket.on('roomJoined', (data) => {
+      this.isHost = false;
+      this.lobby.showLobby(data.roomCode, false, data.players);
+    });
+
+    this.socket.on('playerJoinedRoom', (data) => {
+      this.lobby.updatePlayersList(data.players);
+    });
+
+    this.socket.on('playerDisconnected', (id) => {
+      const rp = this.remotePlayers.get(id);
+      if (rp) {
+        rp.hole.dispose();
+        this.renderer.scene.remove(rp.hole.mesh);
+        this.renderer.scene.remove(rp.hole.voidMesh);
+        this.renderer.scene.remove(rp.hole.glowLight);
+        rp.labelDiv.remove();
+        this.remotePlayers.delete(id);
+      }
+    });
+
+    this.socket.on('joinRoomError', (data) => {
+      this.lobby.showError(data.message);
+      if (this.socket) {
+        this.socket.disconnect();
+        this.socket = null;
+      }
+    });
+
+    this.socket.on('roomClosed', () => {
+      alert('Host left. Room closed.');
+      this.showMenu();
+    });
+
+    this.socket.on('matchStarted', (data) => {
+      this.startMultiplayerMatch(data, mapDef);
+    });
+
+    this.socket.on('playerUpdated', (data) => {
+      let rp = this.remotePlayers.get(data.id);
+      if (!rp) {
+        this.addRemotePlayer(data.id, data);
+        rp = this.remotePlayers.get(data.id);
+      }
+      if (rp) {
+        rp.hole.x = data.x;
+        rp.hole.z = data.z;
+        rp.hole.targetRadius = data.radius;
+        rp.hole.score = data.score;
+        rp.hole.isAlive = data.isAlive;
+        rp.hole.vx = data.vx || 0;
+        rp.hole.vz = data.vz || 0;
+      }
+    });
+
+    this.socket.on('objectEaten', (data) => {
+      const { objectId, eaterId, x, z } = data;
+      const obj = this.objects.getObjects().find(o => o.id === objectId);
+      if (obj && !obj.isEaten) {
+        obj.isEaten = true;
+        obj.swallowProgress = 0.05;
+        obj.eaterX = x;
+        obj.eaterZ = z;
+        
+        this.particles.emitBurst(obj.x, obj.z, obj.type.neonColor, 15);
+        this.audio.playAbsorbSmall(obj.type.size / 145);
+        
+        if (eaterId !== this.socket!.id) {
+          const rp = this.remotePlayers.get(eaterId);
+          if (rp) rp.hole.addScore(obj.type.score, obj.type.growth);
+        }
+      }
+    });
+
+    this.socket.on('objectRespawned', (data) => {
+      const { objectId, x, z } = data;
+      const obj = this.objects.getObjects().find(o => o.id === objectId);
+      if (obj) {
+        obj.x = x; obj.z = z;
+        obj.isEaten = false; obj.swallowProgress = 0;
+        obj.spinSpeed = 0; obj.tiltX = 0; obj.tiltZ = 0;
+        obj.mesh.scale.setScalar(1);
+        obj.mesh.rotation.set(0, 0, 0);
+        obj.mesh.position.set(x, 0, z);
+        obj.justRespawned = true;
+      }
+    });
+
+    this.socket.on('playerEaten', (data) => {
+      const { targetId, eaterId } = data;
+      if (targetId === this.socket!.id) {
+        this.player.kill();
+        this.particles.emitBurst(this.player.x, this.player.z, '#FF00FF', 25);
+        this.camera.addTrauma(0.5);
+        
+        setTimeout(() => {
+          if (this.state === GameState.PLAYING) {
+            const sp = this.getSafeSpawn(this.player.radius);
+            this.player.respawn(sp.x, sp.z);
+            this.socket!.emit('respawn');
+          }
+        }, 3500);
+      } else {
+        const rp = this.remotePlayers.get(targetId);
+        if (rp) {
+          rp.hole.isAlive = false;
+          this.particles.emitBurst(rp.hole.x, rp.hole.z, '#2FF5FF', 25);
+        }
+        if (eaterId === this.socket!.id) {
+          this.player.addScore(450, 22);
+          this.camera.addTrauma(0.4);
+          this.audio.playBotKill();
+          haptics.vibrateBotKill();
+        } else {
+          const eater = this.remotePlayers.get(eaterId);
+          if (eater) eater.hole.addScore(450, 22);
+        }
+      }
+    });
+  }
+
   private timerTick(): void {
+    if (this.isPaused) return;
     if (this.timeLeft <= 0) return;
     this.timeLeft--;
     this.hud.updateTimer(this.timeLeft);
@@ -418,6 +576,7 @@ export class Game {
   };
 
   private updatePlaying(dt: number, time: number): void {
+    if (this.isPaused) return;
     const input = this.input.getInput();
 
     // ─── Player update ───
@@ -484,12 +643,36 @@ export class Game {
         });
       }
 
+      // If host, update and sync bots
+      if (this.isHost && this.socket?.connected) {
+        this.enemies.update(
+          dt, time, this.player.x, this.player.z, this.player.radius,
+          this.player.isAlive, this.spatialGrid, this.renderer.camera,
+          this.freezeTimer > 0
+        );
+
+        // Emit bot updates
+        const botList = this.enemies.getEnemies().map(b => ({
+          id: `bot_${b.id}`,
+          name: b.name,
+          x: b.x,
+          z: b.z,
+          radius: b.radius,
+          score: b.score,
+          isAlive: b.isAlive,
+          vx: b.vx,
+          vz: b.vz,
+          color: b.color
+        }));
+        this.socket.emit('syncBots', { bots: botList });
+      }
+
       // Update remote player meshes and labels
       this.remotePlayers.forEach((rp) => {
         rp.hole.update(dt, 0, 0, time, false);
-        rp.hole.mesh.position.set(rp.hole.x, 0.5, rp.hole.z);
-        rp.hole.glowLight.position.set(rp.hole.x, 10, rp.hole.z);
+        // Do not override y-position to 0.5, keep it recessed as updated by hole.update()
         rp.hole.mesh.visible = rp.hole.isAlive;
+        rp.hole.voidMesh.visible = rp.hole.isAlive;
         rp.hole.glowLight.visible = rp.hole.isAlive;
 
         if (rp.hole.isAlive) {
@@ -526,8 +709,43 @@ export class Game {
 
     // ─── Ground shader uniforms ───
     this.groundMaterial.uniforms.uTime.value = time;
-    this.groundMaterial.uniforms.uHolePos.value.set(this.player.x, 0, this.player.z);
-    this.groundMaterial.uniforms.uHoleRadius.value = this.player.radius;
+    
+    // Pack active holes positions, radii and count
+    const holesPos = this.groundMaterial.uniforms.uHolesPos.value as THREE.Vector3[];
+    const holesRadius = this.groundMaterial.uniforms.uHolesRadius.value as Float32Array;
+    let holesCount = 0;
+
+    // 1. Player
+    if (this.player.isAlive) {
+      holesPos[holesCount].set(this.player.x, 0, this.player.z);
+      holesRadius[holesCount] = this.player.radius;
+      holesCount++;
+    }
+
+    // 2. Local Bots
+    if (this.gameMode !== 'multiplayer' || this.isHost) {
+      for (const bot of this.enemies.getEnemies()) {
+        if (bot.isAlive && holesCount < 6) {
+          holesPos[holesCount].set(bot.x, 0, bot.z);
+          holesRadius[holesCount] = bot.radius;
+          holesCount++;
+        }
+      }
+    }
+
+    // 3. Remote Players
+    if (this.gameMode === 'multiplayer') {
+      this.remotePlayers.forEach((rp) => {
+        if (rp.hole.isAlive && holesCount < 6) {
+          holesPos[holesCount].set(rp.hole.x, 0, rp.hole.z);
+          holesRadius[holesCount] = rp.hole.radius;
+          holesCount++;
+        }
+      });
+    }
+
+    this.groundMaterial.uniforms.uHolesCount.value = holesCount;
+
     const skin = this.player.getRimColor();
     const rgb = this.hexToRgb(skin);
     this.groundMaterial.uniforms.uHoleGlowColor.value.set(rgb.r, rgb.g, rgb.b);
@@ -548,7 +766,8 @@ export class Game {
 
       const lb: LeaderboardEntry[] = this.gameMode === 'multiplayer' ? [
         { name: 'You', score: this.player.score, isPlayer: true },
-        ...Array.from(this.remotePlayers.values()).map(rp => ({ name: rp.labelDiv.textContent || 'Player', score: rp.hole.score, isPlayer: false }))
+        ...Array.from(this.remotePlayers.values()).map(rp => ({ name: rp.labelDiv.textContent || 'Player', score: rp.hole.score, isPlayer: false })),
+        ...(this.isHost ? this.enemies.getEnemies().map(e => ({ name: e.name, score: e.score, isPlayer: false })) : [])
       ].sort((a, b) => b.score - a.score) : [
         { name: 'You', score: this.player.score, isPlayer: true },
         ...this.enemies.getEnemies().map(e => ({ name: e.name, score: e.score, isPlayer: false })),
@@ -593,6 +812,11 @@ export class Game {
             obj.eaterX = this.player.x;
             obj.eaterZ = this.player.z;
 
+            // Emit to server if multiplayer
+            if (this.gameMode === 'multiplayer' && this.socket?.connected) {
+              this.socket.emit('eatObject', { objectId: obj.id, eaterId: this.socket.id });
+            }
+
             let points = obj.type.score;
             if (this.multiplierTimer > 0) points *= 2;
             this.player.addScore(points, obj.type.growth);
@@ -627,32 +851,67 @@ export class Game {
         }
       }
 
-      // ─── Player ↔ Enemies ───
+      // ─── Player ↔ Enemies (Local Bots) ───
       for (const enemy of enemies) {
         if (!enemy.isAlive) continue;
         const dist = distance(enemy.x, enemy.z, this.player.x, this.player.z);
         if (dist < Math.max(this.player.radius, enemy.radius)) {
           if (this.player.radius > enemy.radius + 8) {
             // Player eats bot
-            enemy.isAlive = false;
-            enemy.respawnTimer = 6000;
-            this.player.eatenBotsCount++;
-            this.player.addScore(450, 22);
-            this.particles.emitBurst(enemy.x, enemy.z, enemy.color, 25);
-            this.camera.addTrauma(0.4);
-            this.audio.playBotKill();
-            haptics.vibrateBotKill();
+            if (this.gameMode === 'multiplayer') {
+              if (this.socket?.connected) {
+                this.socket.emit('eatPlayer', { eaterId: this.socket.id, targetId: `bot_${enemy.id}` });
+              }
+            } else {
+              enemy.isAlive = false;
+              enemy.respawnTimer = 6000;
+              this.player.eatenBotsCount++;
+              this.player.addScore(450, 22);
+              this.particles.emitBurst(enemy.x, enemy.z, enemy.color, 25);
+              this.camera.addTrauma(0.4);
+              this.audio.playBotKill();
+              haptics.vibrateBotKill();
+            }
           } else if (enemy.radius > this.player.radius + 8) {
             // Bot eats player
             if (this.ghostTimer <= 0) {
-              this.player.kill();
-              enemy.score += 450;
-              enemy.targetRadius = Math.min(MAX_HOLE_RADIUS, enemy.targetRadius + 22);
-              this.particles.emitBurst(this.player.x, this.player.z, '#2FF5FF', 25);
-              this.camera.addTrauma(0.5);
+              if (this.gameMode === 'multiplayer') {
+                if (this.isHost && this.socket?.connected) {
+                  this.socket.emit('eatPlayer', { eaterId: `bot_${enemy.id}`, targetId: this.socket.id });
+                }
+              } else {
+                this.player.kill();
+                enemy.score += 450;
+                enemy.targetRadius = Math.min(MAX_HOLE_RADIUS, enemy.targetRadius + 22);
+                this.particles.emitBurst(this.player.x, this.player.z, '#2FF5FF', 25);
+                this.camera.addTrauma(0.5);
+              }
             }
           }
         }
+      }
+
+      // ─── Player ↔ Remote Players (including bots for guests) ───
+      if (this.gameMode === 'multiplayer') {
+        this.remotePlayers.forEach((rp, id) => {
+          if (!rp.hole.isAlive) return;
+          const dist = distance(rp.hole.x, rp.hole.z, this.player.x, this.player.z);
+          if (dist < Math.max(this.player.radius, rp.hole.radius)) {
+            if (this.player.radius > rp.hole.radius + 8) {
+              // Player eats remote player/bot
+              if (this.socket?.connected) {
+                this.socket.emit('eatPlayer', { eaterId: this.socket.id, targetId: id });
+              }
+            } else if (rp.hole.radius > this.player.radius + 8) {
+              // Remote player/bot eats player
+              if (this.ghostTimer <= 0) {
+                if (this.socket?.connected) {
+                  this.socket.emit('eatPlayer', { eaterId: id, targetId: this.socket.id });
+                }
+              }
+            }
+          }
+        });
       }
 
       // ─── Player ↔ Powerups ───
@@ -690,12 +949,18 @@ export class Game {
         if (obj.isEaten) continue;
         const dist = distance(obj.x, obj.z, enemy.x, enemy.z);
         if (dist < enemy.radius && enemy.radius > obj.type.size - 2) {
-          obj.isEaten = true;
-          obj.swallowProgress = 0.05;
-          obj.eaterX = enemy.x;
-          obj.eaterZ = enemy.z;
-          enemy.score += obj.type.score;
-          enemy.targetRadius = Math.min(MAX_HOLE_RADIUS, enemy.targetRadius + obj.type.growth);
+          if (this.gameMode === 'multiplayer') {
+            if (this.isHost && this.socket?.connected) {
+              this.socket.emit('eatObject', { objectId: obj.id, eaterId: `bot_${enemy.id}` });
+            }
+          } else {
+            obj.isEaten = true;
+            obj.swallowProgress = 0.05;
+            obj.eaterX = enemy.x;
+            obj.eaterZ = enemy.z;
+            enemy.score += obj.type.score;
+            enemy.targetRadius = Math.min(MAX_HOLE_RADIUS, enemy.targetRadius + obj.type.growth);
+          }
         }
       }
     }
@@ -708,13 +973,25 @@ export class Game {
         const dist = distance(a.x, a.z, b.x, b.z);
         if (dist < Math.max(a.radius, b.radius)) {
           if (a.radius > b.radius + 8) {
-            b.isAlive = false; b.respawnTimer = 6000;
-            a.score += 450; a.targetRadius = Math.min(MAX_HOLE_RADIUS, a.targetRadius + 22);
-            this.particles.emitBurst(b.x, b.z, b.color, 15);
+            if (this.gameMode === 'multiplayer') {
+              if (this.isHost && this.socket?.connected) {
+                this.socket.emit('eatPlayer', { eaterId: `bot_${a.id}`, targetId: `bot_${b.id}` });
+              }
+            } else {
+              b.isAlive = false; b.respawnTimer = 6000;
+              a.score += 450; a.targetRadius = Math.min(MAX_HOLE_RADIUS, a.targetRadius + 22);
+              this.particles.emitBurst(b.x, b.z, b.color, 15);
+            }
           } else if (b.radius > a.radius + 8) {
-            a.isAlive = false; a.respawnTimer = 6000;
-            b.score += 450; b.targetRadius = Math.min(MAX_HOLE_RADIUS, b.targetRadius + 22);
-            this.particles.emitBurst(a.x, a.z, a.color, 15);
+            if (this.gameMode === 'multiplayer') {
+              if (this.isHost && this.socket?.connected) {
+                this.socket.emit('eatPlayer', { eaterId: `bot_${b.id}`, targetId: `bot_${a.id}` });
+              }
+            } else {
+              a.isAlive = false; a.respawnTimer = 6000;
+              b.score += 450; b.targetRadius = Math.min(MAX_HOLE_RADIUS, b.targetRadius + 22);
+              this.particles.emitBurst(a.x, a.z, a.color, 15);
+            }
           }
         }
       }
@@ -731,6 +1008,20 @@ export class Game {
         }
       }
     }
+
+    // ─── Remote Player ↔ Powerups (multiplayer only) ───
+    if (this.gameMode === 'multiplayer') {
+      this.remotePlayers.forEach((rp) => {
+        if (!rp.hole.isAlive) return;
+        for (const pw of this.powerups) {
+          if (pw.isEaten) continue;
+          const dist = distance(pw.x, pw.z, rp.hole.x, rp.hole.z);
+          if (dist < rp.hole.radius) {
+            pw.isEaten = true; pw.mesh.visible = false; pw.glowLight.visible = false;
+          }
+        }
+      });
+    }
   }
 
   // ─── GROUND ───
@@ -746,8 +1037,9 @@ export class Game {
         uTime: { value: 0 },
         uGridColor: { value: new THREE.Vector3(gridRgb.r, gridRgb.g, gridRgb.b) },
         uBaseColor: { value: new THREE.Vector3(baseRgb.r, baseRgb.g, baseRgb.b) },
-        uHolePos: { value: new THREE.Vector3(MAP_SIZE / 2, 0, MAP_SIZE / 2) },
-        uHoleRadius: { value: 24 },
+        uHolesPos: { value: Array.from({ length: 6 }, () => new THREE.Vector3()) },
+        uHolesRadius: { value: new Float32Array(6) },
+        uHolesCount: { value: 0 },
         uHoleGlowColor: { value: new THREE.Vector3(0.48, 0.18, 1.0) },
       },
     });

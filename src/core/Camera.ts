@@ -22,11 +22,17 @@ export class Camera {
   }
 
   /** Set target height/zoom based on hole size */
+  private aspectMultiplier = 1.0;
+
+  /** Set target height/zoom based on hole size */
   setZoom(holeRadius: number): void {
-    // Zoom out as hole grows
-    const minHeight = 300;
-    const maxHeight = 1200;
-    this.targetZoom = Math.max(minHeight, Math.min(maxHeight, 400 + holeRadius * 5));
+    const aspect = window.innerWidth / window.innerHeight;
+    this.aspectMultiplier = aspect < 1.0 ? Math.min(1.7, 1.0 / aspect) : 1.0;
+
+    // Zoom out as hole grows, scaled by aspect ratio multiplier
+    const minHeight = 300 * this.aspectMultiplier;
+    const maxHeight = 1600 * this.aspectMultiplier;
+    this.targetZoom = Math.max(minHeight, Math.min(maxHeight, (400 + holeRadius * 6.0) * this.aspectMultiplier));
   }
 
   /** Add trauma for screen shake (0-1 range) */
@@ -41,10 +47,12 @@ export class Camera {
 
   /** Update camera position each frame */
   update(dt: number): void {
+    const tiltOffset = 300 * this.aspectMultiplier;
+
     // Smooth follow
     const lerpFactor = 0.08;
     const currentX = this.camera.position.x;
-    const currentZ = this.camera.position.z - 300; // offset for perspective tilt
+    const currentZ = this.camera.position.z - tiltOffset; // offset for perspective tilt
     const currentY = this.camera.position.y;
 
     const newX = lerp(currentX, this.targetX, lerpFactor);
@@ -64,7 +72,7 @@ export class Camera {
     this.camera.position.set(
       newX + this.shakeOffsetX,
       newY,
-      newZ + 300 + this.shakeOffsetY // +300 offset for tilt angle
+      newZ + tiltOffset + this.shakeOffsetY // offset for tilt angle
     );
     this.camera.lookAt(newX, 0, newZ);
   }

@@ -15,7 +15,15 @@ export class HUD {
   private sizeFillEl: HTMLDivElement;
   private powerupsEl: HTMLDivElement;
   private muteBtn: HTMLDivElement;
+  private exitBtn: HTMLDivElement;
+  private exitModal: HTMLDivElement;
+  private exitConfirmBtn: HTMLButtonElement;
+  private exitCancelBtn: HTMLButtonElement;
+
   private onMuteToggle: (() => void) | null = null;
+  private onExitClick: (() => void) | null = null;
+  private onExitConfirm: (() => void) | null = null;
+  private onExitCancel: (() => void) | null = null;
   private isMuted = false;
 
   constructor() {
@@ -26,6 +34,7 @@ export class HUD {
     const circumference = 2 * Math.PI * 24;
     this.el.innerHTML = `
       <div class="hud-mute-btn" id="mute-btn">🔊</div>
+      <div class="hud-exit-btn" id="exit-btn">❌</div>
       <div class="hud-score" id="hud-score">0</div>
       <div class="hud-timer" id="hud-timer">
         <svg class="hud-timer-ring" viewBox="0 0 56 56">
@@ -39,6 +48,18 @@ export class HUD {
       <div class="hud-leaderboard" id="hud-leaderboard"></div>
       <div class="hud-size-meter"><div class="hud-size-fill" id="hud-size-fill"></div></div>
       <div class="hud-powerups" id="hud-powerups"></div>
+
+      <!-- Exit confirmation modal overlay -->
+      <div class="hud-exit-modal hidden" id="exit-modal">
+        <div class="hud-exit-card">
+          <div class="hud-exit-title">EXIT MATCH?</div>
+          <div class="hud-exit-desc">Are you sure you want to abandon the match? You will lose any current progress.</div>
+          <div class="hud-exit-buttons">
+            <button class="hud-exit-confirm-btn" id="exit-confirm">YES, EXIT</button>
+            <button class="hud-exit-cancel-btn" id="exit-cancel">CONTINUE</button>
+          </div>
+        </div>
+      </div>
     `;
     document.getElementById('app')!.appendChild(this.el);
 
@@ -49,17 +70,43 @@ export class HUD {
     this.sizeFillEl = this.el.querySelector('#hud-size-fill')!;
     this.powerupsEl = this.el.querySelector('#hud-powerups')!;
     this.muteBtn = this.el.querySelector('#mute-btn')!;
+    this.exitBtn = this.el.querySelector('#exit-btn')!;
+    this.exitModal = this.el.querySelector('#exit-modal')!;
+    this.exitConfirmBtn = this.el.querySelector('#exit-confirm')!;
+    this.exitCancelBtn = this.el.querySelector('#exit-cancel')!;
 
     this.muteBtn.addEventListener('click', () => {
       this.onMuteToggle?.();
       this.isMuted = !this.isMuted;
       this.muteBtn.textContent = this.isMuted ? '🔇' : '🔊';
     });
+
+    this.exitBtn.addEventListener('click', () => {
+      this.exitModal.classList.remove('hidden');
+      this.onExitClick?.();
+    });
+
+    this.exitConfirmBtn.addEventListener('click', () => {
+      this.exitModal.classList.add('hidden');
+      this.onExitConfirm?.();
+    });
+
+    this.exitCancelBtn.addEventListener('click', () => {
+      this.exitModal.classList.add('hidden');
+      this.onExitCancel?.();
+    });
   }
 
   setOnMuteToggle(cb: () => void): void { this.onMuteToggle = cb; }
+  setOnExitClick(cb: () => void): void { this.onExitClick = cb; }
+  setOnExitConfirm(cb: () => void): void { this.onExitConfirm = cb; }
+  setOnExitCancel(cb: () => void): void { this.onExitCancel = cb; }
+
   show(): void { this.el.classList.remove('hidden'); }
-  hide(): void { this.el.classList.add('hidden'); }
+  hide(): void {
+    this.el.classList.add('hidden');
+    this.exitModal.classList.add('hidden');
+  }
 
   updateScore(score: number): void {
     this.scoreEl.textContent = score.toString();
